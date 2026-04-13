@@ -62,11 +62,103 @@ function getFromPathMap(map, fileName) {
 function collectRewriteEdits(sourceFile, checker, _options) {
     const edits = [];
 
-    function getResolvedCallText(baseText, resolved) {
+    function getBooleanType() {
+        return typeof checker.getBooleanType === "function" ? checker.getBooleanType() : null;
+    }
+
+    function getEffectiveExpressionType(node) {
+        if (!node) {
+            return null;
+        }
+
+        if (ts.isParenthesizedExpression(node)) {
+            return getEffectiveExpressionType(node.expression);
+        }
+
+        if (ts.isBinaryExpression(node)) {
+            const assignmentText = resolveCompoundAssignmentText(node.operatorToken.kind);
+            if (assignmentText) {
+                return getEffectiveExpressionType(node.left) || checker.getTypeAtLocation(node.left);
+            }
+
+            const operatorText = resolveBinaryOperatorText(node.operatorToken.kind);
+            if (!operatorText) {
+                return checker.getTypeAtLocation(node);
+            }
+
+            const leftType = getEffectiveExpressionType(node.left) || checker.getTypeAtLocation(node.left);
+            const rightType = getEffectiveExpressionType(node.right) || checker.getTypeAtLocation(node.right);
+
+            if (isNumberLike(leftType) && isNumberLike(rightType)) {
+                return checker.getTypeAtLocation(node);
+            }
+
+            const resolvedBinary = resolveBinaryAnnotatedMethod(leftType, rightType, operatorText, checker);
+            if (resolvedBinary && resolvedBinary.returnType) {
+                return resolvedBinary.returnType;
+            }
+
+            const smartFallback = resolveSmartBinaryFallback(leftType, rightType, operatorText, checker);
+            if (smartFallback && smartFallback.kind === "negate-binary") {
+                return getBooleanType() || checker.getTypeAtLocation(node);
+            }
+            if (smartFallback && smartFallback.addResolved && smartFallback.addResolved.returnType) {
+                return smartFallback.addResolved.returnType;
+            }
+
+            return checker.getTypeAtLocation(node);
+        }
+
+        if (ts.isPrefixUnaryExpression(node)) {
+            const incrementText = resolveIncrementText(node.operator);
+            if (incrementText) {
+                return getEffectiveExpressionType(node.operand) || checker.getTypeAtLocation(node.operand);
+            }
+
+            const unaryText = resolveUnaryOperatorText(node.operator);
+            if (!unaryText) {
+                return checker.getTypeAtLocation(node);
+            }
+
+            const operandType = getEffectiveExpressionType(node.operand) || checker.getTypeAtLocation(node.operand);
+            const resolvedUnary = resolveUnaryAnnotatedMethod(operandType, unaryText, checker);
+            if (resolvedUnary && resolvedUnary.returnType) {
+                return resolvedUnary.returnType;
+            }
+            if (node.operator === ts.SyntaxKind.ExclamationToken) {
+                return getBooleanType() || checker.getTypeAtLocation(node);
+            }
+            return checker.getTypeAtLocation(node);
+        }
+
+        if (ts.isPostfixUnaryExpression(node)) {
+            const incrementText = resolveIncrementText(node.operator);
+            if (incrementText) {
+                return getEffectiveExpressionType(node.operand) || checker.getTypeAtLocation(node.operand);
+            }
+        }
+
+        return checker.getTypeAtLocation(node);
+    }
+
+    function isSimpleCallTargetNode(node) {
+        return !!node && (
+            ts.isIdentifier(node)
+            || ts.isPropertyAccessExpression(node)
+            || ts.isElementAccessExpression(node)
+            || ts.isCallExpression(node)
+            || node.kind === ts.SyntaxKind.ThisKeyword
+            || node.kind === ts.SyntaxKind.SuperKeyword
+            || ts.isParenthesizedExpression(node)
+        );
+    }
+
+    function getResolvedCallText(baseText, resolved, baseNode) {
         if (resolved && resolved.invokeKind === "static" && resolved.ownerName) {
             return `${resolved.ownerName}.${resolved.methodName}`;
         }
-        return `${baseText}.${resolved.methodName}`;
+        const safeBaseText = isSimpleCallTargetNode(baseNode) ? baseText : `(${baseText})`;
+        return `${safeBaseText}.${resolved.methodName}`;
     }
 
     function getResolvedUnaryCallText(operandText, resolvedUnary) {
@@ -78,13 +170,150 @@ function collectRewriteEdits(sourceFile, checker, _options) {
     }
 
     function getResolvedBinaryCallText(leftText, rightText, resolvedBinary) {
+        const leftNode = resolvedBinary.leftNode;
+        const rightNode = resolvedBinary.rightNode;
         const targetText = resolvedBinary.side === "right"
-            ? getResolvedCallText(rightText, resolvedBinary)
-            : getResolvedCallText(leftText, resolvedBinary);
+            ? getResolvedCallText(rightText, resolvedBinary, rightNode)
+            : getResolvedCallText(leftText, resolvedBinary, leftNode);
         if (resolvedBinary.arity === 1) {
             return `${targetText}(${rightText})`;
         }
         return `${targetText}(${leftText}, ${rightText})`;
+    }
+
+    function withNodeResolution(resolved, leftNode, rightNode) {
+        if (!resolved) {
+            return resolved;
+        }
+        return {
+            ...resolved,
+            leftNode,
+            rightNode
+        };
+    }
+
+    function getRenderedExpressionText(node) {
+        if (ts.isParenthesizedExpression(node)) {
+            return `(${getRenderedExpressionText(node.expression)})`;
+        }
+
+        if (ts.isBinaryExpression(node)) {
+            const assignmentOpText = resolveCompoundAssignmentText(node.operatorToken.kind);
+            if (assignmentOpText) {
+                const leftText = getRenderedExpressionText(node.left);
+                const rightText = getRenderedExpressionText(node.right);
+                const leftType = getEffectiveExpressionType(node.left) || checker.getTypeAtLocation(node.left);
+                const rightType = getEffectiveExpressionType(node.right) || checker.getTypeAtLocation(node.right);
+                const resolvedAssignment = withNodeResolution(
+                    resolveBinaryAnnotatedMethod(leftType, rightType, assignmentOpText, checker),
+                    node.left,
+                    node.right
+                );
+                if (resolvedAssignment && resolvedAssignment.side === "left" && resolvedAssignment.arity === 1) {
+                    return `${leftText} = ${getResolvedCallText(leftText, resolvedAssignment, node.left)}(${rightText})`;
+                }
+                if (resolvedAssignment && resolvedAssignment.side === "left" && resolvedAssignment.arity === 2) {
+                    return `${leftText} = ${getResolvedCallText(leftText, resolvedAssignment, node.left)}(${leftText}, ${rightText})`;
+                }
+                if (resolvedAssignment && resolvedAssignment.side === "right" && resolvedAssignment.arity === 2) {
+                    return `${leftText} = ${getResolvedCallText(rightText, resolvedAssignment, node.right)}(${leftText}, ${rightText})`;
+                }
+                return node.getText(sourceFile);
+            }
+
+            const operatorText = resolveBinaryOperatorText(node.operatorToken.kind);
+            if (!operatorText) {
+                return node.getText(sourceFile);
+            }
+
+            const leftType = getEffectiveExpressionType(node.left) || checker.getTypeAtLocation(node.left);
+            const rightType = getEffectiveExpressionType(node.right) || checker.getTypeAtLocation(node.right);
+            if (isNumberLike(leftType) && isNumberLike(rightType)) {
+                return node.getText(sourceFile);
+            }
+
+            const leftText = getRenderedExpressionText(node.left);
+            const rightText = getRenderedExpressionText(node.right);
+            const resolvedBinary = withNodeResolution(
+                resolveBinaryAnnotatedMethod(leftType, rightType, operatorText, checker),
+                node.left,
+                node.right
+            );
+            if (resolvedBinary) {
+                return getResolvedBinaryCallText(leftText, rightText, resolvedBinary);
+            }
+
+            const smartFallback = resolveSmartBinaryFallback(leftType, rightType, operatorText, checker);
+            if (smartFallback && smartFallback.kind === "negate-binary") {
+                const baseResolved = withNodeResolution(smartFallback.baseResolved, node.left, node.right);
+                return `!(${getResolvedBinaryCallText(leftText, rightText, baseResolved)})`;
+            }
+
+            if (smartFallback && smartFallback.kind === "add-with-native-negation") {
+                const negRightText = `-(${rightText})`;
+                const addResolved = withNodeResolution(smartFallback.addResolved, node.left, node.right);
+                return getResolvedBinaryCallText(leftText, negRightText, addResolved);
+            }
+
+            if (smartFallback && smartFallback.kind === "add-with-overload-negation") {
+                const negRightText = getResolvedUnaryCallText(rightText, smartFallback.negResolved);
+                const addResolved = withNodeResolution(smartFallback.addResolved, node.left, node.right);
+                return getResolvedBinaryCallText(leftText, negRightText, addResolved);
+            }
+
+            return node.getText(sourceFile);
+        }
+
+        if (ts.isPrefixUnaryExpression(node)) {
+            const incrementText = resolveIncrementText(node.operator);
+            if (incrementText) {
+                const operandType = getEffectiveExpressionType(node.operand) || checker.getTypeAtLocation(node.operand);
+                const resolvedIncrement = resolveIncrementAnnotatedMethod(operandType, incrementText, checker);
+                const operandText = getRenderedExpressionText(node.operand);
+                if (resolvedIncrement && resolvedIncrement.arity === 1) {
+                    return `${operandText} = ${getResolvedCallText(operandText, resolvedIncrement, node.operand)}(1)`;
+                }
+                if (resolvedIncrement && resolvedIncrement.arity === 2) {
+                    return `${operandText} = ${getResolvedCallText(operandText, resolvedIncrement, node.operand)}(${operandText}, 1)`;
+                }
+            }
+
+            const unaryText = resolveUnaryOperatorText(node.operator);
+            if (!unaryText) {
+                return node.getText(sourceFile);
+            }
+            const operandType = getEffectiveExpressionType(node.operand) || checker.getTypeAtLocation(node.operand);
+            const resolvedUnary = resolveUnaryAnnotatedMethod(operandType, unaryText, checker);
+            if (!resolvedUnary) {
+                return node.getText(sourceFile);
+            }
+
+            const operandText = getRenderedExpressionText(node.operand);
+            return getResolvedUnaryCallText(operandText, resolvedUnary);
+        }
+
+        if (ts.isPostfixUnaryExpression(node)) {
+            const incrementText = resolveIncrementText(node.operator);
+            if (!incrementText) {
+                return node.getText(sourceFile);
+            }
+            const operandType = getEffectiveExpressionType(node.operand) || checker.getTypeAtLocation(node.operand);
+            const resolvedIncrement = resolveIncrementAnnotatedMethod(operandType, incrementText, checker);
+            if (!resolvedIncrement) {
+                return node.getText(sourceFile);
+            }
+
+            const operandText = getRenderedExpressionText(node.operand);
+            if (resolvedIncrement.arity === 1) {
+                return `${operandText} = ${getResolvedCallText(operandText, resolvedIncrement, node.operand)}(1)`;
+            }
+            if (resolvedIncrement.arity === 2) {
+                return `${operandText} = ${getResolvedCallText(operandText, resolvedIncrement, node.operand)}(${operandText}, 1)`;
+            }
+            return node.getText(sourceFile);
+        }
+
+        return node.getText(sourceFile);
     }
 
     function visit(node) {
@@ -93,16 +322,20 @@ function collectRewriteEdits(sourceFile, checker, _options) {
         if (ts.isBinaryExpression(node)) {
             const assignmentOpText = resolveCompoundAssignmentText(node.operatorToken.kind);
             if (assignmentOpText) {
-                const leftText = node.left.getText(sourceFile);
-                const rightText = node.right.getText(sourceFile);
-                const leftType = checker.getTypeAtLocation(node.left);
-                const rightType = checker.getTypeAtLocation(node.right);
-                const resolvedAssignment = resolveBinaryAnnotatedMethod(leftType, rightType, assignmentOpText, checker);
+                const leftText = getRenderedExpressionText(node.left);
+                const rightText = getRenderedExpressionText(node.right);
+                const leftType = getEffectiveExpressionType(node.left) || checker.getTypeAtLocation(node.left);
+                const rightType = getEffectiveExpressionType(node.right) || checker.getTypeAtLocation(node.right);
+                const resolvedAssignment = withNodeResolution(
+                    resolveBinaryAnnotatedMethod(leftType, rightType, assignmentOpText, checker),
+                    node.left,
+                    node.right
+                );
                 if (resolvedAssignment && resolvedAssignment.side === "left" && resolvedAssignment.arity === 1) {
                     edits.push({
                         start: node.getStart(sourceFile),
                         end: node.getEnd(),
-                        replacement: `${leftText} = ${getResolvedCallText(leftText, resolvedAssignment)}(${rightText})`
+                        replacement: `${leftText} = ${getResolvedCallText(leftText, resolvedAssignment, node.left)}(${rightText})`
                     });
                     return;
                 }
@@ -111,7 +344,7 @@ function collectRewriteEdits(sourceFile, checker, _options) {
                     edits.push({
                         start: node.getStart(sourceFile),
                         end: node.getEnd(),
-                        replacement: `${leftText} = ${getResolvedCallText(leftText, resolvedAssignment)}(${leftText}, ${rightText})`
+                        replacement: `${leftText} = ${getResolvedCallText(leftText, resolvedAssignment, node.left)}(${leftText}, ${rightText})`
                     });
                     return;
                 }
@@ -120,7 +353,7 @@ function collectRewriteEdits(sourceFile, checker, _options) {
                     edits.push({
                         start: node.getStart(sourceFile),
                         end: node.getEnd(),
-                        replacement: `${leftText} = ${getResolvedCallText(rightText, resolvedAssignment)}(${leftText}, ${rightText})`
+                        replacement: `${leftText} = ${getResolvedCallText(rightText, resolvedAssignment, node.right)}(${leftText}, ${rightText})`
                     });
                     return;
                 }
@@ -131,16 +364,20 @@ function collectRewriteEdits(sourceFile, checker, _options) {
                 return;
             }
 
-            const leftType = checker.getTypeAtLocation(node.left);
-            const rightType = checker.getTypeAtLocation(node.right);
+            const leftType = getEffectiveExpressionType(node.left) || checker.getTypeAtLocation(node.left);
+            const rightType = getEffectiveExpressionType(node.right) || checker.getTypeAtLocation(node.right);
 
             if (isNumberLike(leftType) && isNumberLike(rightType)) {
                 return;
             }
 
-            const leftText = node.left.getText(sourceFile);
-            const rightText = node.right.getText(sourceFile);
-            const resolvedBinary = resolveBinaryAnnotatedMethod(leftType, rightType, operatorText, checker);
+            const leftText = getRenderedExpressionText(node.left);
+            const rightText = getRenderedExpressionText(node.right);
+            const resolvedBinary = withNodeResolution(
+                resolveBinaryAnnotatedMethod(leftType, rightType, operatorText, checker),
+                node.left,
+                node.right
+            );
             if (resolvedBinary && resolvedBinary.side === "left" && resolvedBinary.arity === 1) {
                 edits.push({
                     start: node.getStart(sourceFile),
@@ -204,33 +441,33 @@ function collectRewriteEdits(sourceFile, checker, _options) {
         if (ts.isPrefixUnaryExpression(node)) {
             const incrementText = resolveIncrementText(node.operator);
             if (incrementText) {
-                const operandType = checker.getTypeAtLocation(node.operand);
+                const operandType = getEffectiveExpressionType(node.operand) || checker.getTypeAtLocation(node.operand);
                 const resolvedIncrement = resolveIncrementAnnotatedMethod(operandType, incrementText, checker);
                 if (resolvedIncrement && resolvedIncrement.arity === 1) {
-                    const operandText = node.operand.getText(sourceFile);
+                    const operandText = getRenderedExpressionText(node.operand);
                     edits.push({
                         start: node.getStart(sourceFile),
                         end: node.getEnd(),
-                        replacement: `${operandText} = ${getResolvedCallText(operandText, resolvedIncrement)}(1)`
+                        replacement: `${operandText} = ${getResolvedCallText(operandText, resolvedIncrement, node.operand)}(1)`
                     });
                 }
 
                 if (resolvedIncrement && resolvedIncrement.arity === 2) {
-                    const operandText = node.operand.getText(sourceFile);
+                    const operandText = getRenderedExpressionText(node.operand);
                     edits.push({
                         start: node.getStart(sourceFile),
                         end: node.getEnd(),
-                        replacement: `${operandText} = ${getResolvedCallText(operandText, resolvedIncrement)}(${operandText}, 1)`
+                        replacement: `${operandText} = ${getResolvedCallText(operandText, resolvedIncrement, node.operand)}(${operandText}, 1)`
                     });
                 }
             }
 
             const unaryText = resolveUnaryOperatorText(node.operator);
             if (unaryText) {
-                const operandType = checker.getTypeAtLocation(node.operand);
+                const operandType = getEffectiveExpressionType(node.operand) || checker.getTypeAtLocation(node.operand);
                 const resolvedUnary = resolveUnaryAnnotatedMethod(operandType, unaryText, checker);
                 if (resolvedUnary && resolvedUnary.arity === 0) {
-                    const operandText = node.operand.getText(sourceFile);
+                    const operandText = getRenderedExpressionText(node.operand);
                     edits.push({
                         start: node.getStart(sourceFile),
                         end: node.getEnd(),
@@ -239,7 +476,7 @@ function collectRewriteEdits(sourceFile, checker, _options) {
                     return;
                 }
                 if (resolvedUnary && resolvedUnary.arity === 1) {
-                    const operandText = node.operand.getText(sourceFile);
+                    const operandText = getRenderedExpressionText(node.operand);
                     edits.push({
                         start: node.getStart(sourceFile),
                         end: node.getEnd(),
@@ -253,23 +490,23 @@ function collectRewriteEdits(sourceFile, checker, _options) {
         if (ts.isPostfixUnaryExpression(node)) {
             const incrementText = resolveIncrementText(node.operator);
             if (incrementText) {
-                const operandType = checker.getTypeAtLocation(node.operand);
+                const operandType = getEffectiveExpressionType(node.operand) || checker.getTypeAtLocation(node.operand);
                 const resolvedIncrement = resolveIncrementAnnotatedMethod(operandType, incrementText, checker);
                 if (resolvedIncrement && resolvedIncrement.arity === 1) {
-                    const operandText = node.operand.getText(sourceFile);
+                    const operandText = getRenderedExpressionText(node.operand);
                     edits.push({
                         start: node.getStart(sourceFile),
                         end: node.getEnd(),
-                        replacement: `${operandText} = ${getResolvedCallText(operandText, resolvedIncrement)}(1)`
+                        replacement: `${operandText} = ${getResolvedCallText(operandText, resolvedIncrement, node.operand)}(1)`
                     });
                 }
 
                 if (resolvedIncrement && resolvedIncrement.arity === 2) {
-                    const operandText = node.operand.getText(sourceFile);
+                    const operandText = getRenderedExpressionText(node.operand);
                     edits.push({
                         start: node.getStart(sourceFile),
                         end: node.getEnd(),
-                        replacement: `${operandText} = ${getResolvedCallText(operandText, resolvedIncrement)}(${operandText}, 1)`
+                        replacement: `${operandText} = ${getResolvedCallText(operandText, resolvedIncrement, node.operand)}(${operandText}, 1)`
                     });
                 }
             }
@@ -278,7 +515,12 @@ function collectRewriteEdits(sourceFile, checker, _options) {
 
     visit(sourceFile);
 
-    edits.sort((a, b) => b.start - a.start);
+    edits.sort((a, b) => {
+        if (b.start !== a.start) {
+            return b.start - a.start;
+        }
+        return a.end - b.end;
+    });
     return edits;
 }
 
@@ -288,6 +530,41 @@ function applyEditsToText(text, edits) {
         output = output.slice(0, edit.start) + edit.replacement + output.slice(edit.end);
     }
     return output;
+}
+
+function removeOverlappingEdits(edits) {
+    if (!Array.isArray(edits) || edits.length <= 1) {
+        return edits;
+    }
+
+    // Prefer outermost edits so nested rewrites do not corrupt source offsets.
+    const sorted = [...edits].sort((a, b) => {
+        if (a.start !== b.start) {
+            return a.start - b.start;
+        }
+        return b.end - a.end;
+    });
+
+    const accepted = [];
+    for (const edit of sorted) {
+        const last = accepted[accepted.length - 1];
+        if (!last || edit.start >= last.end) {
+            accepted.push(edit);
+            continue;
+        }
+
+        // Nested overlap: keep the already accepted outer edit.
+        if (edit.end <= last.end) {
+            continue;
+        }
+
+        // Defensive fallback for partial overlap: prefer wider span.
+        if ((edit.end - edit.start) > (last.end - last.start)) {
+            accepted[accepted.length - 1] = edit;
+        }
+    }
+
+    return accepted;
 }
 
 function createPositionMapper(editsDescending, originalLength, transformedLength) {
@@ -380,7 +657,7 @@ function rewriteProgramFiles(program, host, options, requestedFileName) {
         }
 
         const text = sourceFile.getFullText();
-        const edits = collectRewriteEdits(sourceFile, checker, options);
+        const edits = removeOverlappingEdits(collectRewriteEdits(sourceFile, checker, options));
         if (edits.length === 0) {
             continue;
         }

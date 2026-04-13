@@ -46,13 +46,97 @@ function createOperatorOverloadTransformer(program, _options) {
             return factory.createCallExpression(target, undefined, [left, right]);
         }
 
+        function getOriginalNode(node) {
+            return node && node.original ? node.original : node;
+        }
+
+        function getBooleanType() {
+            return typeof checker.getBooleanType === "function" ? checker.getBooleanType() : null;
+        }
+
+        function getEffectiveExpressionType(node) {
+            if (!node) {
+                return null;
+            }
+
+            if (ts.isParenthesizedExpression(node)) {
+                return getEffectiveExpressionType(node.expression);
+            }
+
+            if (ts.isBinaryExpression(node)) {
+                const assignmentText = resolveCompoundAssignmentText(node.operatorToken.kind);
+                if (assignmentText) {
+                    return getEffectiveExpressionType(node.left) || checker.getTypeAtLocation(node.left);
+                }
+
+                const operatorText = resolveBinaryOperatorText(node.operatorToken.kind);
+                if (!operatorText) {
+                    return checker.getTypeAtLocation(node);
+                }
+
+                const leftType = getEffectiveExpressionType(node.left) || checker.getTypeAtLocation(node.left);
+                const rightType = getEffectiveExpressionType(node.right) || checker.getTypeAtLocation(node.right);
+
+                if (isNumberLike(leftType) && isNumberLike(rightType)) {
+                    return checker.getTypeAtLocation(node);
+                }
+
+                const resolvedBinary = resolveBinaryAnnotatedMethod(leftType, rightType, operatorText, checker);
+                if (resolvedBinary && resolvedBinary.returnType) {
+                    return resolvedBinary.returnType;
+                }
+
+                const smartFallback = resolveSmartBinaryFallback(leftType, rightType, operatorText, checker);
+                if (smartFallback && smartFallback.kind === "negate-binary") {
+                    return getBooleanType() || checker.getTypeAtLocation(node);
+                }
+                if (smartFallback && smartFallback.addResolved && smartFallback.addResolved.returnType) {
+                    return smartFallback.addResolved.returnType;
+                }
+
+                return checker.getTypeAtLocation(node);
+            }
+
+            if (ts.isPrefixUnaryExpression(node)) {
+                const incrementText = resolveIncrementText(node.operator);
+                if (incrementText) {
+                    return getEffectiveExpressionType(node.operand) || checker.getTypeAtLocation(node.operand);
+                }
+
+                const operatorText = resolveUnaryOperatorText(node.operator);
+                if (!operatorText) {
+                    return checker.getTypeAtLocation(node);
+                }
+
+                const operandType = getEffectiveExpressionType(node.operand) || checker.getTypeAtLocation(node.operand);
+                const resolvedUnary = resolveUnaryAnnotatedMethod(operandType, operatorText, checker);
+                if (resolvedUnary && resolvedUnary.returnType) {
+                    return resolvedUnary.returnType;
+                }
+                if (node.operator === ts.SyntaxKind.ExclamationToken) {
+                    return getBooleanType() || checker.getTypeAtLocation(node);
+                }
+                return checker.getTypeAtLocation(node);
+            }
+
+            if (ts.isPostfixUnaryExpression(node)) {
+                const incrementText = resolveIncrementText(node.operator);
+                if (incrementText) {
+                    return getEffectiveExpressionType(node.operand) || checker.getTypeAtLocation(node.operand);
+                }
+            }
+
+            return checker.getTypeAtLocation(node);
+        }
+
         function rewriteBinaryExpression(node) {
+            const originalNode = getOriginalNode(node);
             const assignmentOpText = resolveCompoundAssignmentText(node.operatorToken.kind);
             if (assignmentOpText) {
                 const left = node.left;
                 const right = node.right;
-                const leftType = checker.getTypeAtLocation(left);
-                const rightType = checker.getTypeAtLocation(right);
+                const leftType = getEffectiveExpressionType(getOriginalNode(originalNode.left)) || checker.getTypeAtLocation(getOriginalNode(originalNode.left));
+                const rightType = getEffectiveExpressionType(getOriginalNode(originalNode.right)) || checker.getTypeAtLocation(getOriginalNode(originalNode.right));
 
                 const resolvedAssignment = resolveBinaryAnnotatedMethod(leftType, rightType, assignmentOpText, checker);
                 if (resolvedAssignment && resolvedAssignment.side === "left" && resolvedAssignment.arity === 1) {
@@ -89,15 +173,15 @@ function createOperatorOverloadTransformer(program, _options) {
                 }
             }
 
-            const operatorText = resolveBinaryOperatorText(node.operatorToken.kind);
+            const operatorText = resolveBinaryOperatorText(originalNode.operatorToken.kind);
             if (!operatorText) {
                 return node;
             }
 
             const left = node.left;
             const right = node.right;
-            const leftType = checker.getTypeAtLocation(left);
-            const rightType = checker.getTypeAtLocation(right);
+            const leftType = getEffectiveExpressionType(getOriginalNode(originalNode.left)) || checker.getTypeAtLocation(getOriginalNode(originalNode.left));
+            const rightType = getEffectiveExpressionType(getOriginalNode(originalNode.right)) || checker.getTypeAtLocation(getOriginalNode(originalNode.right));
 
             if (isNumberLike(leftType) && isNumberLike(rightType)) {
                 return node;
@@ -139,9 +223,10 @@ function createOperatorOverloadTransformer(program, _options) {
         }
 
         function rewritePrefixUnaryExpression(node) {
-            const incrementText = resolveIncrementText(node.operator);
+            const originalNode = getOriginalNode(node);
+            const incrementText = resolveIncrementText(originalNode.operator);
             if (incrementText) {
-                const operandType = checker.getTypeAtLocation(node.operand);
+                const operandType = getEffectiveExpressionType(getOriginalNode(originalNode.operand)) || checker.getTypeAtLocation(getOriginalNode(originalNode.operand));
                 const resolvedIncrement = resolveIncrementAnnotatedMethod(operandType, incrementText, checker);
                 if (resolvedIncrement && resolvedIncrement.arity === 1) {
                     return factory.createAssignment(
@@ -166,9 +251,9 @@ function createOperatorOverloadTransformer(program, _options) {
                 }
             }
 
-            const operatorText = resolveUnaryOperatorText(node.operator);
+            const operatorText = resolveUnaryOperatorText(originalNode.operator);
             if (operatorText) {
-                const operandType = checker.getTypeAtLocation(node.operand);
+                const operandType = getEffectiveExpressionType(getOriginalNode(originalNode.operand)) || checker.getTypeAtLocation(getOriginalNode(originalNode.operand));
                 const resolvedUnary = resolveUnaryAnnotatedMethod(operandType, operatorText, checker);
                 if (resolvedUnary && resolvedUnary.arity === 0) {
                     return factory.createCallExpression(
@@ -190,9 +275,10 @@ function createOperatorOverloadTransformer(program, _options) {
         }
 
         function rewritePostfixUnaryExpression(node) {
-            const incrementText = resolveIncrementText(node.operator);
+            const originalNode = getOriginalNode(node);
+            const incrementText = resolveIncrementText(originalNode.operator);
             if (incrementText) {
-                const operandType = checker.getTypeAtLocation(node.operand);
+                const operandType = getEffectiveExpressionType(getOriginalNode(originalNode.operand)) || checker.getTypeAtLocation(getOriginalNode(originalNode.operand));
                 const resolvedIncrement = resolveIncrementAnnotatedMethod(operandType, incrementText, checker);
                 if (resolvedIncrement && resolvedIncrement.arity === 1) {
                     return factory.createAssignment(

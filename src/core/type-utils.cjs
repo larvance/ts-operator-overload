@@ -45,6 +45,14 @@ function getDeclarationParameterTypes(declaration, checker) {
     return parameters.map((parameter) => checker.getTypeOfSymbolAtLocation(parameter, declaration));
 }
 
+function getDeclarationReturnType(declaration, checker) {
+    const signature = checker.getSignatureFromDeclaration(declaration);
+    if (!signature) {
+        return null;
+    }
+    return checker.getReturnTypeOfSignature(signature);
+}
+
 function areArgumentsAssignable(argumentTypes, parameterTypes, checker) {
     if (!Array.isArray(argumentTypes) || !Array.isArray(parameterTypes) || argumentTypes.length !== parameterTypes.length) {
         return false;
@@ -120,7 +128,10 @@ function findAnnotatedOperatorMethodByArguments(type, operatorText, checker, arg
 
                 const methodName = getDeclarationNameText(declaration, typeof property.getName === "function" ? property.getName() : null);
                 if (methodName) {
-                    return methodName;
+                    return {
+                        methodName,
+                        returnType: getDeclarationReturnType(declaration, checker)
+                    };
                 }
             }
         }
@@ -182,7 +193,11 @@ function findAnnotatedStaticOperatorMethodByArguments(type, operatorText, checke
 
                 const methodName = getDeclarationNameText(member, null);
                 if (methodName) {
-                    return {ownerName, methodName};
+                    return {
+                        ownerName,
+                        methodName,
+                        returnType: getDeclarationReturnType(member, checker)
+                    };
                 }
             }
         }
@@ -256,7 +271,13 @@ function findAnnotatedOperatorMethodName(type, operatorText, checker, arity, see
 function resolveBinaryAnnotatedMethod(leftType, rightType, operatorText, checker) {
     const leftOneArg = findAnnotatedOperatorMethodByArguments(leftType, operatorText, checker, [rightType]);
     if (leftOneArg) {
-        return {side: "left", methodName: leftOneArg, arity: 1, invokeKind: "instance"};
+        return {
+            side: "left",
+            methodName: leftOneArg.methodName,
+            arity: 1,
+            invokeKind: "instance",
+            returnType: leftOneArg.returnType || null
+        };
     }
 
     const leftTwoArg = findAnnotatedStaticOperatorMethodByArguments(leftType, operatorText, checker, [leftType, rightType]);
@@ -266,7 +287,8 @@ function resolveBinaryAnnotatedMethod(leftType, rightType, operatorText, checker
             methodName: leftTwoArg.methodName,
             arity: 2,
             invokeKind: "static",
-            ownerName: leftTwoArg.ownerName
+            ownerName: leftTwoArg.ownerName,
+            returnType: leftTwoArg.returnType || null
         };
     }
 
@@ -279,7 +301,8 @@ function resolveBinaryAnnotatedMethod(leftType, rightType, operatorText, checker
             methodName: rightTwoArg.methodName,
             arity: 2,
             invokeKind: "static",
-            ownerName: rightTwoArg.ownerName
+            ownerName: rightTwoArg.ownerName,
+            returnType: rightTwoArg.returnType || null
         };
     }
 
@@ -292,7 +315,15 @@ function resolveIncrementAnnotatedMethod(type, operatorText, checker) {
         ? findAnnotatedOperatorMethodByArguments(type, operatorText, checker, [numberType])
         : findAnnotatedOperatorMethodName(type, operatorText, checker, 1);
     if (oneArg) {
-        return {methodName: oneArg, arity: 1, invokeKind: "instance"};
+        if (typeof oneArg === "string") {
+            return {methodName: oneArg, arity: 1, invokeKind: "instance"};
+        }
+        return {
+            methodName: oneArg.methodName,
+            arity: 1,
+            invokeKind: "instance",
+            returnType: oneArg.returnType || null
+        };
     }
 
     const twoArg = numberType
@@ -302,7 +333,13 @@ function resolveIncrementAnnotatedMethod(type, operatorText, checker) {
         if (typeof twoArg === "string") {
             return {methodName: twoArg, arity: 2, invokeKind: "instance"};
         }
-        return {methodName: twoArg.methodName, arity: 2, invokeKind: "static", ownerName: twoArg.ownerName};
+        return {
+            methodName: twoArg.methodName,
+            arity: 2,
+            invokeKind: "static",
+            ownerName: twoArg.ownerName,
+            returnType: twoArg.returnType || null
+        };
     }
 
     return null;
@@ -311,12 +348,12 @@ function resolveIncrementAnnotatedMethod(type, operatorText, checker) {
 function resolveUnaryAnnotatedMethod(type, operatorText, checker) {
     const zeroArg = findAnnotatedOperatorMethodByArguments(type, operatorText, checker, []);
     if (zeroArg) {
-        return {methodName: zeroArg, arity: 0};
+        return {methodName: zeroArg.methodName, arity: 0, returnType: zeroArg.returnType || null};
     }
 
     const oneArg = findAnnotatedOperatorMethodByArguments(type, operatorText, checker, [type]);
     if (oneArg) {
-        return {methodName: oneArg, arity: 1};
+        return {methodName: oneArg.methodName, arity: 1, returnType: oneArg.returnType || null};
     }
 
     return null;

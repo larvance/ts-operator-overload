@@ -368,6 +368,13 @@ function runTsserverProjectCheck(args) {
             }
             fail(lines.join("\n"));
         }
+        if (pluginDiagnostics.length > 0) {
+            const lines = ["Did not expect any diagnostics in typed-ok check."];
+            for (const diag of pluginDiagnostics) {
+                lines.push(formatDiagnostic(diag));
+            }
+            fail(lines.join("\n"));
+        }
         if (hasPropertyMissingError(pluginDiagnostics)) {
             const lines = ["Did not expect property-missing diagnostic (TS2339) in typed-ok check."];
             for (const diag of pluginDiagnostics) {
