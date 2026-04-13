@@ -13,6 +13,51 @@ const {
     resolveSmartBinaryFallback
 } = require("../../core/type-utils.cjs");
 
+const shadowCacheByHost = new WeakMap();
+
+function getOptionsKey(options) {
+    const shadowScope = options && options.shadowScope === "project" ? "project" : "file";
+    return `${options && options.allowRightOperand ? "1" : "0"}:${shadowScope}`;
+}
+
+function getProjectVersion(baseHost, fileName) {
+    if (baseHost && typeof baseHost.getProjectVersion === "function") {
+        return `p:${baseHost.getProjectVersion()}`;
+    }
+    if (baseHost && typeof baseHost.getScriptVersion === "function" && fileName) {
+        return `f:${baseHost.getScriptVersion(fileName) || "0"}`;
+    }
+    return "none";
+}
+
+function normalizePathForCompare(filePath) {
+    return String(filePath || "").replace(/\\/g, "/").toLowerCase();
+}
+
+function resolveRequestedFileName(program, host, requestedFileName) {
+    if (!requestedFileName) {
+        return null;
+    }
+    if (program.getSourceFile(requestedFileName)) {
+        return requestedFileName;
+    }
+    const normalizedRequested = normalizePathForCompare(requestedFileName);
+    for (const candidate of host.getScriptFileNames()) {
+        if (normalizePathForCompare(candidate) === normalizedRequested) {
+            return candidate;
+        }
+    }
+    return requestedFileName;
+}
+
+function getFromPathMap(map, fileName) {
+    if (map.has(fileName)) {
+        return map.get(fileName);
+    }
+    const normalized = normalizePathForCompare(fileName);
+    return map.get(normalized);
+}
+
 
 function collectRewriteEdits(sourceFile, checker, _options) {
     const edits = [];
@@ -318,9 +363,13 @@ function createPositionMapper(editsDescending, originalLength, transformedLength
     };
 }
 
-function rewriteProgramFiles(program, host, options) {
+function rewriteProgramFiles(program, host, options, requestedFileName) {
     const checker = program.getTypeChecker();
-    const fileNames = host.getScriptFileNames();
+    const shadowScope = options && options.shadowScope === "project" ? "project" : "file";
+    const resolvedRequestedFileName = resolveRequestedFileName(program, host, requestedFileName);
+    const fileNames = shadowScope === "project"
+        ? host.getScriptFileNames()
+        : (resolvedRequestedFileName ? [resolvedRequestedFileName] : host.getScriptFileNames());
     const transformedFiles = new Map();
     const mappers = new Map();
 
@@ -337,8 +386,11 @@ function rewriteProgramFiles(program, host, options) {
         }
 
         const transformedText = applyEditsToText(text, edits);
+        const mapper = createPositionMapper(edits, text.length, transformedText.length);
         transformedFiles.set(fileName, transformedText);
-        mappers.set(fileName, createPositionMapper(edits, text.length, transformedText.length));
+        transformedFiles.set(normalizePathForCompare(fileName), transformedText);
+        mappers.set(fileName, mapper);
+        mappers.set(normalizePathForCompare(fileName), mapper);
     }
 
     return {
@@ -347,18 +399,13 @@ function rewriteProgramFiles(program, host, options) {
     };
 }
 
-function createShadowLanguageService(tsModule, baseHost, compilerOptions, transformedFiles) {
-    const versionMap = new Map();
-    for (const fileName of baseHost.getScriptFileNames()) {
-        versionMap.set(fileName, baseHost.getScriptVersion ? baseHost.getScriptVersion(fileName) : "0");
-    }
-
+function createShadowLanguageService(tsModule, baseHost, compilerOptions, transformedFiles, documentRegistry) {
     const shadowHost = {
         getCompilationSettings: () => compilerOptions,
         getScriptFileNames: () => baseHost.getScriptFileNames(),
-        getScriptVersion: (fileName) => versionMap.get(fileName) || "0",
+        getScriptVersion: (fileName) => (baseHost.getScriptVersion ? baseHost.getScriptVersion(fileName) : "0"),
         getScriptSnapshot: (fileName) => {
-            const transformed = transformedFiles.get(fileName);
+            const transformed = getFromPathMap(transformedFiles, fileName);
             if (typeof transformed === "string") {
                 return tsModule.ScriptSnapshot.fromString(transformed);
             }
@@ -376,7 +423,7 @@ function createShadowLanguageService(tsModule, baseHost, compilerOptions, transf
         getCurrentDirectory: () => baseHost.getCurrentDirectory(),
         getDefaultLibFileName: (options) => tsModule.getDefaultLibFilePath(options),
         fileExists: (fileName) => {
-            if (transformedFiles.has(fileName)) {
+            if (typeof getFromPathMap(transformedFiles, fileName) === "string") {
                 return true;
             }
             if (baseHost.fileExists) {
@@ -385,8 +432,9 @@ function createShadowLanguageService(tsModule, baseHost, compilerOptions, transf
             return tsModule.sys.fileExists(fileName);
         },
         readFile: (fileName) => {
-            if (transformedFiles.has(fileName)) {
-                return transformedFiles.get(fileName);
+            const transformed = getFromPathMap(transformedFiles, fileName);
+            if (typeof transformed === "string") {
+                return transformed;
             }
             if (baseHost.readFile) {
                 return baseHost.readFile(fileName);
@@ -402,7 +450,7 @@ function createShadowLanguageService(tsModule, baseHost, compilerOptions, transf
     void shadowHost.getCompilationSettings;
     void shadowHost.getDefaultLibFileName;
 
-    return tsModule.createLanguageService(shadowHost, tsModule.createDocumentRegistry());
+    return tsModule.createLanguageService(shadowHost, documentRegistry || tsModule.createDocumentRegistry());
 }
 
 function remapDiagnosticPosition(diagnostic, mapper) {
@@ -422,7 +470,7 @@ function remapDiagnosticPosition(diagnostic, mapper) {
     };
 }
 
-function createShadowContext(tsModule, info, options) {
+function createShadowContext(tsModule, info, options, fileName) {
     const baseLanguageService = info.languageService;
     const program = baseLanguageService.getProgram();
     if (!program) {
@@ -434,19 +482,42 @@ function createShadowContext(tsModule, info, options) {
         return null;
     }
 
-    const rewriteResult = rewriteProgramFiles(program, baseHost, options);
+    let cacheEntry = shadowCacheByHost.get(baseHost);
+    if (!cacheEntry) {
+        cacheEntry = {
+            key: "",
+            context: null,
+            documentRegistry: tsModule.createDocumentRegistry()
+        };
+        shadowCacheByHost.set(baseHost, cacheEntry);
+    }
+
+    const cacheKey = `${getOptionsKey(options)}:${fileName || ""}:${getProjectVersion(baseHost, fileName)}`;
+    if (cacheEntry.context && cacheEntry.key === cacheKey) {
+        return cacheEntry.context;
+    }
+
+    if (cacheEntry.context && cacheEntry.context.shadowLanguageService) {
+        cacheEntry.context.shadowLanguageService.dispose();
+    }
+
+    const rewriteResult = rewriteProgramFiles(program, baseHost, options, fileName);
     const shadowLanguageService = createShadowLanguageService(
         tsModule,
         baseHost,
         program.getCompilerOptions(),
-        rewriteResult.transformedFiles
+        rewriteResult.transformedFiles,
+        cacheEntry.documentRegistry
     );
 
-    return {
+    cacheEntry.context = {
         baseLanguageService,
         shadowLanguageService,
         rewriteResult
     };
+    cacheEntry.key = cacheKey;
+
+    return cacheEntry.context;
 }
 
 function remapTextSpan(span, mapper) {
@@ -543,83 +614,67 @@ function remapInlayHints(hints, mapper) {
 }
 
 function getShadowSemanticDiagnostics(tsModule, info, fileName, options) {
-    const context = createShadowContext(tsModule, info, options);
+    const context = createShadowContext(tsModule, info, options, fileName);
     if (!context) {
         return info.languageService.getSemanticDiagnostics(fileName);
     }
 
-    try {
-        const diagnostics = context.shadowLanguageService.getSemanticDiagnostics(fileName);
-        const mapper = context.rewriteResult.mappers.get(fileName);
-        return diagnostics.map((diagnostic) => remapDiagnosticPosition(diagnostic, mapper));
-    } finally {
-        context.shadowLanguageService.dispose();
-    }
+    const diagnostics = context.shadowLanguageService.getSemanticDiagnostics(fileName);
+    const mapper = getFromPathMap(context.rewriteResult.mappers, fileName);
+    return diagnostics.map((diagnostic) => remapDiagnosticPosition(diagnostic, mapper));
 }
 
 function getShadowQuickInfoAtPosition(tsModule, info, fileName, position, options) {
-    const context = createShadowContext(tsModule, info, options);
+    const context = createShadowContext(tsModule, info, options, fileName);
     if (!context) {
         return info.languageService.getQuickInfoAtPosition(fileName, position);
     }
 
-    try {
-        const mapper = context.rewriteResult.mappers.get(fileName);
-        const newPosition = mapper ? mapper.mapOldToNew(position) : position;
-        const quickInfo = context.shadowLanguageService.getQuickInfoAtPosition(fileName, newPosition);
-        if (!quickInfo) {
-            return quickInfo;
-        }
-
-        return {
-            ...quickInfo,
-            textSpan: remapTextSpan(quickInfo.textSpan, mapper)
-        };
-    } finally {
-        context.shadowLanguageService.dispose();
+    const mapper = getFromPathMap(context.rewriteResult.mappers, fileName);
+    const newPosition = mapper ? mapper.mapOldToNew(position) : position;
+    const quickInfo = context.shadowLanguageService.getQuickInfoAtPosition(fileName, newPosition);
+    if (!quickInfo) {
+        return quickInfo;
     }
+
+    return {
+        ...quickInfo,
+        textSpan: remapTextSpan(quickInfo.textSpan, mapper)
+    };
 }
 
 function getShadowCompletionsAtPosition(tsModule, info, fileName, position, options, preferences, triggerCharacter, triggerKind) {
-    const context = createShadowContext(tsModule, info, options);
+    const context = createShadowContext(tsModule, info, options, fileName);
     if (!context) {
         return info.languageService.getCompletionsAtPosition(fileName, position, preferences, triggerCharacter, triggerKind);
     }
 
-    try {
-        const mapper = context.rewriteResult.mappers.get(fileName);
-        const newPosition = mapper ? mapper.mapOldToNew(position) : position;
-        const completions = context.shadowLanguageService.getCompletionsAtPosition(
-            fileName,
-            newPosition,
-            preferences,
-            triggerCharacter,
-            triggerKind
-        );
-        return remapCompletionResult(completions, mapper);
-    } finally {
-        context.shadowLanguageService.dispose();
-    }
+    const mapper = getFromPathMap(context.rewriteResult.mappers, fileName);
+    const newPosition = mapper ? mapper.mapOldToNew(position) : position;
+    const completions = context.shadowLanguageService.getCompletionsAtPosition(
+        fileName,
+        newPosition,
+        preferences,
+        triggerCharacter,
+        triggerKind
+    );
+    return remapCompletionResult(completions, mapper);
 }
 
 function getShadowCompletionEntryDetails(tsModule, info, fileName, position, options, detailArgs) {
-    const context = createShadowContext(tsModule, info, options);
+    const context = createShadowContext(tsModule, info, options, fileName);
     if (!context) {
         return info.languageService.getCompletionEntryDetails(fileName, position, ...detailArgs);
     }
 
-    try {
-        const mapper = context.rewriteResult.mappers.get(fileName);
-        const newPosition = mapper ? mapper.mapOldToNew(position) : position;
-        const details = context.shadowLanguageService.getCompletionEntryDetails(fileName, newPosition, ...detailArgs);
-        return remapCompletionDetails(details, mapper);
-    } finally {
-        context.shadowLanguageService.dispose();
-    }
+    const mapper = getFromPathMap(context.rewriteResult.mappers, fileName);
+    const newPosition = mapper ? mapper.mapOldToNew(position) : position;
+    const details = context.shadowLanguageService.getCompletionEntryDetails(fileName, newPosition, ...detailArgs);
+    return remapCompletionDetails(details, mapper);
 }
 
 function getShadowInlayHints(tsModule, info, fileName, span, options, preferences) {
-    const context = createShadowContext(tsModule, info, options);
+    const context = createShadowContext(tsModule, info, options, fileName);
     if (!context) {
         const baseMethod = typeof info.languageService.provideInlayHints === "function"
             ? info.languageService.provideInlayHints.bind(info.languageService)
@@ -627,28 +682,24 @@ function getShadowInlayHints(tsModule, info, fileName, span, options, preference
         return baseMethod ? baseMethod(fileName, span, preferences) : [];
     }
 
-    try {
-        const mapper = context.rewriteResult.mappers.get(fileName);
-        const newSpan = mapper && span && typeof span.start === "number" && typeof span.length === "number"
-            ? {
-                start: mapper.mapOldToNew(span.start),
-                length: Math.max(1, mapper.mapOldToNew(span.start + span.length) - mapper.mapOldToNew(span.start))
-            }
-            : span;
-
-        const shadowMethod = typeof context.shadowLanguageService.provideInlayHints === "function"
-            ? context.shadowLanguageService.provideInlayHints.bind(context.shadowLanguageService)
-            : (typeof context.shadowLanguageService.getInlayHints === "function" ? context.shadowLanguageService.getInlayHints.bind(context.shadowLanguageService) : null);
-
-        if (!shadowMethod) {
-            return [];
+    const mapper = getFromPathMap(context.rewriteResult.mappers, fileName);
+    const newSpan = mapper && span && typeof span.start === "number" && typeof span.length === "number"
+        ? {
+            start: mapper.mapOldToNew(span.start),
+            length: Math.max(1, mapper.mapOldToNew(span.start + span.length) - mapper.mapOldToNew(span.start))
         }
+        : span;
 
-        const hints = shadowMethod(fileName, newSpan, preferences);
-        return remapInlayHints(hints, mapper);
-    } finally {
-        context.shadowLanguageService.dispose();
+    const shadowMethod = typeof context.shadowLanguageService.provideInlayHints === "function"
+        ? context.shadowLanguageService.provideInlayHints.bind(context.shadowLanguageService)
+        : (typeof context.shadowLanguageService.getInlayHints === "function" ? context.shadowLanguageService.getInlayHints.bind(context.shadowLanguageService) : null);
+
+    if (!shadowMethod) {
+        return [];
     }
+
+    const hints = shadowMethod(fileName, newSpan, preferences);
+    return remapInlayHints(hints, mapper);
 }
 
 module.exports = {

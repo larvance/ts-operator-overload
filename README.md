@@ -220,6 +220,40 @@ Modes:
 - `suppress` suppresses operator diagnostics when a valid overload exists
 - `shadow` builds a rewritten virtual program for richer types, completions, and inlay hints
 
+Performance options for `shadow` mode:
+
+- `shadowScope`: `"file"` (default, rewrites only requested file) or `"project"`
+- `maxShadowFiles`: auto-fallback threshold for large projects (0 disables threshold)
+- `autoFallbackToSuppress`: `true` by default
+- `shadowFeatures`: selectively enable expensive editor features
+
+Large-project recommended config (fast editor feedback):
+
+```json
+{
+  "compilerOptions": {
+    "plugins": [
+      {
+        "name": "ts-operator-overload",
+        "mode": "shadow",
+        "shadowScope": "file",
+        "maxShadowFiles": 400,
+        "autoFallbackToSuppress": true,
+        "shadowFeatures": {
+          "diagnostics": true,
+          "quickInfo": true,
+          "completions": false,
+          "completionDetails": false,
+          "inlayHints": false
+        }
+      }
+    ]
+  }
+}
+```
+
+If you only want fast error suppression and don't need shadow-typed editor features, use `"mode": "suppress"`.
+
 ## Programmatic API
 
 From `index.d.ts`:

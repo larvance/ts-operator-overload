@@ -20,19 +20,59 @@ function init(modules) {
             proxy[key] = typeof original === "function" ? original.bind(languageService) : original;
         }
 
+        function parseShadowFeatures(config) {
+            if (!config || typeof config.shadowFeatures !== "object" || config.shadowFeatures === null) {
+                return {
+                    diagnostics: true,
+                    quickInfo: true,
+                    completions: true,
+                    completionDetails: true,
+                    inlayHints: true
+                };
+            }
+
+            const raw = config.shadowFeatures;
+            return {
+                diagnostics: raw.diagnostics !== false,
+                quickInfo: raw.quickInfo !== false,
+                completions: raw.completions !== false,
+                completionDetails: raw.completionDetails !== false,
+                inlayHints: raw.inlayHints !== false
+            };
+        }
+
         function getPluginOptions() {
+            const maxShadowFiles = Number(info.config && info.config.maxShadowFiles);
             return {
                 allowRightOperand: !!(info.config && info.config.allowRightOperand),
-                mode: info.config && typeof info.config.mode === "string" ? info.config.mode : "suppress"
+                mode: info.config && typeof info.config.mode === "string" ? info.config.mode : "suppress",
+                shadowScope: info.config && info.config.shadowScope === "project" ? "project" : "file",
+                autoFallbackToSuppress: !info.config || info.config.autoFallbackToSuppress !== false,
+                maxShadowFiles: Number.isFinite(maxShadowFiles) && maxShadowFiles > 0 ? maxShadowFiles : 0,
+                shadowFeatures: parseShadowFeatures(info.config)
             };
+        }
+
+        function canUseShadow(pluginOptions) {
+            if (pluginOptions.mode !== "shadow") {
+                return false;
+            }
+            if (!pluginOptions.autoFallbackToSuppress || pluginOptions.maxShadowFiles <= 0) {
+                return true;
+            }
+
+            const host = info.languageServiceHost;
+            const fileNames = host && typeof host.getScriptFileNames === "function" ? host.getScriptFileNames() : [];
+            return fileNames.length <= pluginOptions.maxShadowFiles;
         }
 
         proxy.getSemanticDiagnostics = (fileName) => {
             const pluginOptions = getPluginOptions();
+            const useShadow = canUseShadow(pluginOptions);
             const program = languageService.getProgram();
             const annotationDiagnostics = program ? getOperatorAnnotationDiagnosticsForFile(program, fileName) : [];
 
-            if (pluginOptions.mode === "shadow") {
+            if (useShadow && pluginOptions.shadowFeatures.diagnostics) {
                 return getShadowSemanticDiagnostics(ts, info, fileName, pluginOptions).concat(annotationDiagnostics);
             }
 
@@ -48,12 +88,15 @@ function init(modules) {
 
         proxy.getQuickInfoAtPosition = (fileName, position) => {
             const pluginOptions = getPluginOptions();
+            if (!canUseShadow(pluginOptions) || !pluginOptions.shadowFeatures.quickInfo) {
+                return languageService.getQuickInfoAtPosition(fileName, position);
+            }
             return getShadowQuickInfoAtPosition(ts, info, fileName, position, pluginOptions);
         };
 
         proxy.getCompletionsAtPosition = (fileName, position, preferences, triggerCharacter, triggerKind) => {
             const pluginOptions = getPluginOptions();
-            if (pluginOptions.mode !== "shadow") {
+            if (!canUseShadow(pluginOptions) || !pluginOptions.shadowFeatures.completions) {
                 return languageService.getCompletionsAtPosition(fileName, position, preferences, triggerCharacter, triggerKind);
             }
             return getShadowCompletionsAtPosition(ts, info, fileName, position, pluginOptions, preferences, triggerCharacter, triggerKind);
@@ -61,7 +104,7 @@ function init(modules) {
 
         proxy.getCompletionEntryDetails = (fileName, position, ...detailArgs) => {
             const pluginOptions = getPluginOptions();
-            if (pluginOptions.mode !== "shadow") {
+            if (!canUseShadow(pluginOptions) || !pluginOptions.shadowFeatures.completionDetails) {
                 return languageService.getCompletionEntryDetails(fileName, position, ...detailArgs);
             }
             return getShadowCompletionEntryDetails(ts, info, fileName, position, pluginOptions, detailArgs);
@@ -69,7 +112,7 @@ function init(modules) {
 
         proxy.provideInlayHints = (fileName, span, preferences) => {
             const pluginOptions = getPluginOptions();
-            if (pluginOptions.mode !== "shadow") {
+            if (!canUseShadow(pluginOptions) || !pluginOptions.shadowFeatures.inlayHints) {
                 return typeof languageService.provideInlayHints === "function"
                     ? languageService.provideInlayHints(fileName, span, preferences)
                     : (typeof languageService.getInlayHints === "function" ? languageService.getInlayHints(fileName, span, preferences) : []);
@@ -79,7 +122,7 @@ function init(modules) {
 
         proxy.getInlayHints = (fileName, span, preferences) => {
             const pluginOptions = getPluginOptions();
-            if (pluginOptions.mode !== "shadow") {
+            if (!canUseShadow(pluginOptions) || !pluginOptions.shadowFeatures.inlayHints) {
                 return typeof languageService.getInlayHints === "function"
                     ? languageService.getInlayHints(fileName, span, preferences)
                     : (typeof languageService.provideInlayHints === "function" ? languageService.provideInlayHints(fileName, span, preferences) : []);
