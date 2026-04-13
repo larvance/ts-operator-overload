@@ -219,6 +219,7 @@ Modes:
 
 - `suppress` suppresses operator diagnostics when a valid overload exists
 - `shadow` builds a rewritten virtual program for richer types, completions, and inlay hints
+- `hybrid` responds fast like `suppress`, then warms shadow typing after edits settle
 
 Performance options for `shadow` mode:
 
@@ -226,6 +227,39 @@ Performance options for `shadow` mode:
 - `maxShadowFiles`: auto-fallback threshold for large projects (0 disables threshold)
 - `autoFallbackToSuppress`: `true` by default
 - `shadowFeatures`: selectively enable expensive editor features
+
+Hybrid options:
+
+- `hybridDebounceMs`: wait time after edits before warm shadow rebuild (default `800`)
+- `hybridWarmOn`: per-feature shadow enablement in hybrid mode
+- `hybridMaxBuildMs`: optional budget for a warm rebuild before it is treated as failed
+- `hybridFailureDisableAfter`: disable hybrid warmup temporarily after repeated failures
+- `hybridCooldownMs`: cooldown duration before retrying warmups
+
+Example hybrid config:
+
+```json
+{
+  "compilerOptions": {
+    "plugins": [
+      {
+        "name": "ts-operator-overload",
+        "mode": "hybrid",
+        "shadowScope": "file",
+        "maxShadowFiles": 400,
+        "hybridDebounceMs": 800,
+        "hybridWarmOn": {
+          "quickInfo": true,
+          "completions": true,
+          "completionDetails": true,
+          "inlayHints": false,
+          "diagnostics": false
+        }
+      }
+    ]
+  }
+}
+```
 
 Large-project recommended config (fast editor feedback):
 

@@ -520,6 +520,29 @@ function createShadowContext(tsModule, info, options, fileName) {
     return cacheEntry.context;
 }
 
+function getExistingShadowContext(tsModule, info, options, fileName) {
+    const baseHost = info.languageServiceHost;
+    if (!baseHost || typeof baseHost.getScriptFileNames !== "function") {
+        return null;
+    }
+
+    const cacheEntry = shadowCacheByHost.get(baseHost);
+    if (!cacheEntry) {
+        return null;
+    }
+
+    const cacheKey = `${getOptionsKey(options)}:${fileName || ""}:${getProjectVersion(baseHost, fileName)}`;
+    if (cacheEntry.key !== cacheKey) {
+        return null;
+    }
+
+    return cacheEntry.context || null;
+}
+
+function warmShadowContext(tsModule, info, options, fileName) {
+    return createShadowContext(tsModule, info, options, fileName);
+}
+
 function remapTextSpan(span, mapper) {
     if (!span || !mapper || typeof span.start !== "number") {
         return span;
@@ -703,6 +726,8 @@ function getShadowInlayHints(tsModule, info, fileName, span, options, preference
 }
 
 module.exports = {
+    getExistingShadowContext,
+    warmShadowContext,
     getShadowSemanticDiagnostics,
     getShadowQuickInfoAtPosition,
     getShadowCompletionsAtPosition,
