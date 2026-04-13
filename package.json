@@ -1,0 +1,49 @@
+{
+  "name": "ts-operator-overload",
+  "version": "0.1.1",
+  "keywords": [
+    "typescript",
+    "operator-overloading",
+    "transformer",
+    "tsserver",
+    "plugin",
+    "compiler",
+    "ast",
+    "lint"
+  ],
+  "author": "larvance",
+  "license": "MIT",
+  "type": "commonjs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/larvance/ts-operator-overload.git"
+  },
+  "bugs": {
+    "url": "https://github.com/larvance/ts-operator-overload/issues"
+  },
+  "homepage": "https://github.com/larvance/ts-operator-overload#readme",
+  "main": "index.cjs",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "require": "./index.cjs",
+      "default": "./index.cjs"
+    },
+    "./tsserver": {
+      "types": "./index.d.ts",
+      "require": "./src/plugins/tsserver/index.cjs",
+      "default": "./src/plugins/tsserver/index.cjs"
+    }
+  },
+  "scripts": {
+    "build:examples": "node scripts/build-tsc.cjs --project test/tsc-operators-all/tsconfig.json --outDir test/tsc-operators-all/dist",
+    "test": "node scripts/run-tests.cjs",
+    "pack:dry-run": "npm pack --dry-run --ignore-scripts",
+    "prepare:publish": "npm test && npm run pack:dry-run",
+    "prepublishOnly": "npm run prepare:publish"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}

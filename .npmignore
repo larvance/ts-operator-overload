@@ -1,0 +1,20 @@
+# VCS and editor metadata
+.git/
+.idea/
+.vscode/
+
+# Development and test assets
+test/
+scripts/
+examples.ts
+tsconfig.json
+
+# Local dependencies and transient files
+node_modules/
+*.log
+npm-debug.log*
+*.tgz
+
+# Misc
+.DS_Store
+

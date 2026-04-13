@@ -1,0 +1,13 @@
+{
+  "name": "tsx-operator-overload-sandbox",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "ts-operator-overload": "file:../..",
+    "typescript": "^5.6.3"
+  }
+}
+

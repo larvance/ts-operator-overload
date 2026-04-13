@@ -1,0 +1,10 @@
+{
+  "name": "vscode-operator-overload-sample",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "ts-operator-overload": "file:../.."
+  }
+}
+

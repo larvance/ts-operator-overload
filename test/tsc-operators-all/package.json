@@ -1,0 +1,9 @@
+{
+  "name": "tsc-operators-all-sandbox",
+  "private": true,
+  "devDependencies": {
+    "ts-operator-overload": "file:../..",
+    "typescript": "^5.6.3"
+  }
+}
+

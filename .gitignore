@@ -1,0 +1,32 @@
+.idea/
+.vscode/
+.next/
+.vite/
+
+node_modules/
+
+# npm/yarn/pnpm logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# lockfiles (project intentionally keeps them out of repo)
+package-lock.json
+
+# build/test artifacts
+dist/
+coverage/
+*.tsbuildinfo
+
+# package artifacts
+*.tgz
+
+# local env files
+.env
+.env.*
+
+# OS noise
+.DS_Store
+Thumbs.db
+
