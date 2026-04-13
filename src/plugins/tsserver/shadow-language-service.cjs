@@ -525,8 +525,16 @@ function collectRewriteEdits(sourceFile, checker, _options) {
 }
 
 function applyEditsToText(text, edits) {
+    // Apply from right-to-left so source offsets stay valid after each splice.
+    const editsDescending = [...edits].sort((a, b) => {
+        if (b.start !== a.start) {
+            return b.start - a.start;
+        }
+        return a.end - b.end;
+    });
+
     let output = text;
-    for (const edit of edits) {
+    for (const edit of editsDescending) {
         output = output.slice(0, edit.start) + edit.replacement + output.slice(edit.end);
     }
     return output;
